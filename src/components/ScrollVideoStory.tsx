@@ -5,62 +5,107 @@ type Props = {
   onCompleteChange?: (complete: boolean) => void
 }
 
+const USEFUL_SECONDS = 4
+
 export function ScrollVideoStory({ onCompleteChange }: Props) {
   const sectionRef = useRef<HTMLElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
-  const pendingTimeRef = useRef<number | null>(null)
-  const seekingRef = useRef(false)
-  const progress = useSmoothScrollProgress(sectionRef, { ease: 0.07, uiStep: 0.0015 })
+  const unlockedRef = useRef(false)
+  const lastSetRef = useRef(-1)
+  const progress = useSmoothScrollProgress(sectionRef, { ease: 0.1, uiStep: 0.001 })
+  const progressRef = useRef(progress)
   const [ready, setReady] = useState(false)
+
+  progressRef.current = progress
 
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
 
-    video.pause()
     video.muted = true
+    video.defaultMuted = true
+    video.playsInline = true
+    video.setAttribute('playsinline', 'true')
+    video.setAttribute('webkit-playsinline', 'true')
+    video.setAttribute('muted', 'true')
+    video.pause()
 
-    const markReady = () => setReady(true)
-    if (video.readyState >= 1) markReady()
-    else video.addEventListener('loadedmetadata', markReady)
+    const markReady = () => {
+      if (video.duration && !Number.isNaN(video.duration)) setReady(true)
+    }
 
-    const onSeeked = () => {
-      seekingRef.current = false
-      if (pendingTimeRef.current == null || !video.duration) return
-      const next = pendingTimeRef.current
-      pendingTimeRef.current = null
-      if (Math.abs(video.currentTime - next) > 0.012) {
-        seekingRef.current = true
-        video.currentTime = next
+    // iOS/Android: unlock seeking with a muted play → pause cycle
+    const unlock = async () => {
+      if (unlockedRef.current) return
+      try {
+        video.muted = true
+        const playPromise = video.play()
+        if (playPromise) await playPromise
+        video.pause()
+        unlockedRef.current = true
+        // Nudge decoder so first seek works
+        if (video.readyState >= 1) video.currentTime = 0.01
+      } catch {
+        // Will retry on first user gesture
       }
     }
 
-    video.addEventListener('seeked', onSeeked)
+    const onGesture = () => {
+      void unlock()
+    }
+
+    if (video.readyState >= 1) markReady()
+    video.addEventListener('loadedmetadata', markReady)
+    video.addEventListener('loadeddata', () => {
+      markReady()
+      void unlock()
+    })
+    video.addEventListener('canplay', markReady)
+
+    window.addEventListener('touchstart', onGesture, { passive: true, once: true })
+    window.addEventListener('scroll', onGesture, { passive: true, once: true })
+    void unlock()
+
     return () => {
       video.removeEventListener('loadedmetadata', markReady)
-      video.removeEventListener('seeked', onSeeked)
+      video.removeEventListener('loadeddata', markReady)
+      video.removeEventListener('canplay', markReady)
+      window.removeEventListener('touchstart', onGesture)
+      window.removeEventListener('scroll', onGesture)
     }
   }, [])
 
+  // Scrub in rAF — avoid stuck seekingRef on mobile (seeked often never fires)
   useEffect(() => {
-    const video = videoRef.current
-    if (!video || !ready || !video.duration) return
+    if (!ready) return
+    let raf = 0
 
-    // Only scrub 0 → 4s (file is trimmed; hard-cap as safety)
-    const usable = Math.min(video.duration, 4)
-    const targetTime = Math.min(Math.max(progress * usable, 0), Math.max(usable - 0.05, 0))
+    const tick = () => {
+      const video = videoRef.current
+      if (video && video.duration && !Number.isNaN(video.duration)) {
+        const usable = Math.min(video.duration, USEFUL_SECONDS)
+        const target = Math.min(
+          Math.max(progressRef.current * usable, 0),
+          Math.max(usable - 0.04, 0),
+        )
 
-    if (Math.abs(video.currentTime - targetTime) < 0.02) return
-
-    if (seekingRef.current) {
-      pendingTimeRef.current = targetTime
-      return
+        if (Math.abs(target - lastSetRef.current) >= 0.04) {
+          try {
+            // Keep paused while scrubbing (required on iOS)
+            if (!video.paused) video.pause()
+            video.currentTime = target
+            lastSetRef.current = target
+          } catch {
+            // Ignore transient seek errors while buffering
+          }
+        }
+      }
+      raf = requestAnimationFrame(tick)
     }
 
-    seekingRef.current = true
-    pendingTimeRef.current = null
-    video.currentTime = targetTime
-  }, [progress, ready])
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [ready])
 
   useEffect(() => {
     onCompleteChange?.(progress >= 0.97)
@@ -75,11 +120,14 @@ export function ScrollVideoStory({ onCompleteChange }: Props) {
         <video
           ref={videoRef}
           className="scroll-story-video"
-          src={`/video/farm-story.mp4?v=4s`}
+          src="/video/farm-story.mp4"
           muted
+          autoPlay={false}
           playsInline
           preload="auto"
+          controls={false}
           disablePictureInPicture
+          disableRemotePlayback
         />
         <div className="scroll-story-veil" />
 

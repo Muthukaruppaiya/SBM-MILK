@@ -303,6 +303,7 @@ textarea {
   position: sticky;
   top: 0;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   display: grid;
   place-items: center;
@@ -319,6 +320,9 @@ textarea {
   transform: translateZ(0);
   will-change: contents;
   pointer-events: none;
+  /* Helps mobile browsers composite/seek the video layer */
+  -webkit-transform: translateZ(0);
+  background: #0f241c;
 }
 
 .scroll-story-veil {

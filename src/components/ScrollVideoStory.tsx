@@ -6,13 +6,18 @@ type Props = {
 }
 
 const USEFUL_SECONDS = 4
+/** Source video fps — snap seeks to frame edges for clearer steps */
+const VIDEO_FPS = 24
+const FRAME_STEP = 1 / VIDEO_FPS
 
 export function ScrollVideoStory({ onCompleteChange }: Props) {
   const sectionRef = useRef<HTMLElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const unlockedRef = useRef(false)
-  const lastSetRef = useRef(-1)
-  const progress = useSmoothScrollProgress(sectionRef, { ease: 0.1, uiStep: 0.001 })
+  const smoothTimeRef = useRef(0)
+  const lastAppliedFrameRef = useRef(-1)
+  // Softer ease + tiny UI step = more intermediate scroll “frames”
+  const progress = useSmoothScrollProgress(sectionRef, { ease: 0.055, uiStep: 0.0008 })
   const progressRef = useRef(progress)
   const [ready, setReady] = useState(false)
 
@@ -34,7 +39,6 @@ export function ScrollVideoStory({ onCompleteChange }: Props) {
       if (video.duration && !Number.isNaN(video.duration)) setReady(true)
     }
 
-    // iOS/Android: unlock seeking with a muted play → pause cycle
     const unlock = async () => {
       if (unlockedRef.current) return
       try {
@@ -43,10 +47,9 @@ export function ScrollVideoStory({ onCompleteChange }: Props) {
         if (playPromise) await playPromise
         video.pause()
         unlockedRef.current = true
-        // Nudge decoder so first seek works
-        if (video.readyState >= 1) video.currentTime = 0.01
+        if (video.readyState >= 1) video.currentTime = FRAME_STEP
       } catch {
-        // Will retry on first user gesture
+        // retry on gesture
       }
     }
 
@@ -75,7 +78,6 @@ export function ScrollVideoStory({ onCompleteChange }: Props) {
     }
   }, [])
 
-  // Scrub in rAF — avoid stuck seekingRef on mobile (seeked often never fires)
   useEffect(() => {
     if (!ready) return
     let raf = 0
@@ -86,17 +88,23 @@ export function ScrollVideoStory({ onCompleteChange }: Props) {
         const usable = Math.min(video.duration, USEFUL_SECONDS)
         const target = Math.min(
           Math.max(progressRef.current * usable, 0),
-          Math.max(usable - 0.04, 0),
+          Math.max(usable - FRAME_STEP, 0),
         )
 
-        if (Math.abs(target - lastSetRef.current) >= 0.04) {
+        // Lerp time for silkier scrubbing (less jump / lag)
+        smoothTimeRef.current += (target - smoothTimeRef.current) * 0.14
+
+        // Quantize to video frames so each step looks clear
+        const frameIndex = Math.round(smoothTimeRef.current / FRAME_STEP)
+        const frameTime = Math.min(frameIndex * FRAME_STEP, usable - 0.001)
+
+        if (frameIndex !== lastAppliedFrameRef.current) {
           try {
-            // Keep paused while scrubbing (required on iOS)
             if (!video.paused) video.pause()
-            video.currentTime = target
-            lastSetRef.current = target
+            video.currentTime = frameTime
+            lastAppliedFrameRef.current = frameIndex
           } catch {
-            // Ignore transient seek errors while buffering
+            // buffering seek miss — retry next frame
           }
         }
       }
